@@ -1,8 +1,9 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 /* eslint-disable react-native/no-inline-styles */
 
-import React, {useState, useEffect} from 'react';
+import React, {useState, useEffect, useRef} from 'react';
 import {
+  AppState,
   Text,
   Alert,
   View,
@@ -19,12 +20,15 @@ import {
 import {styles} from './src/styles/styles';
 import {DeviceList} from './src/DeviceList';
 import BleManager from 'react-native-ble-manager';
-import {Colors} from 'react-native/Libraries/NewAppScreen';
+import { Colors } from 'react-native/Libraries/NewAppScreen';
+import BackgroundTimer from 'react-native-background-timer';
 
 const BleManagerModule = NativeModules.BleManager;
 const BleManagerEmitter = new NativeEventEmitter(BleManagerModule);
 
 const App = () => {
+  const appState = useRef(AppState.currentState);
+  const [appStateVisible, setAppStateVisible] = useState(appState.current);
   const peripherals = new Map();
   const [isScanning, setIsScanning] = useState(false);
   const [connectedDevices, setConnectedDevices] = useState([]);
@@ -48,8 +52,44 @@ const App = () => {
     }
   };
 
+  const handleBluetoothConnectPermission = async () => {
+    if (Platform.OS === 'android' && Platform.Version >= 23) {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        );
+
+        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+          console.log('Bluetooth connect permission granted');
+        } else {
+          console.log('Bluetooth connect permission denied');
+        }
+      } catch (error) {
+        console.log('Error requesting bluetooth connect permission:', error);
+      }
+    }
+  };
+
+  const handleBluetoothScanPermission = async () => {
+    if (Platform.OS === 'android' && Platform.Version >= 23) {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+        );
+
+        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+          console.log('Bluetooth scan permission granted');
+        } else {
+          console.log('Bluetooth scan permission denied');
+        }
+      } catch (error) {
+        console.log('Error requesting bluetooth scan permission:', error);
+      }
+    }
+  };
+
   const handleGetConnectedDevices = () => {
-    BleManager.getBondedPeripherals([]).then(results => {
+    BleManager.getConnectedPeripherals([]).then(results => {
       for (let i = 0; i < results.length; i++) {
         let peripheral = results[i];
         peripheral.connected = true;
@@ -57,10 +97,41 @@ const App = () => {
         setConnectedDevices(Array.from(peripherals.values()));
       }
     });
+    // BleManager.getBondedPeripherals([]).then(results => {
+    //   for (let i = 0; i < results.length; i++) {
+    //     let peripheral = results[i];
+    //     peripheral.connected = true;
+    //     peripherals.set(peripheral.id, peripheral);
+    //     setConnectedDevices(Array.from(peripherals.values()));
+    //   }
+    // });
   };
 
   useEffect(() => {
     handleLocationPermission();
+    handleBluetoothConnectPermission();
+    handleBluetoothScanPermission();
+
+    const subscription = AppState.addEventListener('change', nextAppState => {
+      if (
+        appState.current.match(/inactive|background/) &&
+        nextAppState === 'active'
+      ) {
+        console.log('App has come to the foreground!');
+      }
+
+      appState.current = nextAppState;
+      setAppStateVisible(appState.current);
+      console.log('AppState', appState.current);
+      if(appState.current === 'background' || appState.current === 'inactive') {
+        console.log("setting timeout for 10 seconds")
+        BackgroundTimer.runBackgroundTimer(() => {
+          disconnectDevices();
+        }, 10000);
+      } else {
+        BackgroundTimer.stopBackgroundTimer();
+      }
+    });
 
     BleManager.enableBluetooth().then(() => {
       console.log('Bluetooth is turned on!');
@@ -74,8 +145,14 @@ const App = () => {
     let stopDiscoverListener = BleManagerEmitter.addListener(
       'BleManagerDiscoverPeripheral',
       peripheral => {
-        peripherals.set(peripheral.id, peripheral);
-        setDiscoveredDevices(Array.from(peripherals.values()));
+        // console.log('BleManagerDiscoverPeripheral:', peripheral);
+        // console.log('peripheral id:', peripheral.id);
+        console.log('peripheral name:', peripheral.name);
+        if (String(peripheral.name).startsWith('ITC'))
+        {
+          peripherals.set(peripheral.id, peripheral);
+          setDiscoveredDevices(Array.from(peripherals.values()));
+        }
       },
     );
 
@@ -98,6 +175,7 @@ const App = () => {
       stopDiscoverListener.remove();
       stopConnectListener.remove();
       stopScanListener.remove();
+      subscription.remove();
     };
   }, []);
 
@@ -114,34 +192,80 @@ const App = () => {
     }
   };
 
+  const disconnectDevices = () => {
+    // console.log("Disconnecting Devices")
+    BleManager.getConnectedPeripherals([]).then(results => {
+      for (let i = 0; i < results.length; i++) {
+        let peripheral = results[i];
+        BleManager.disconnect(peripheral.id)
+          .then(() => {
+            peripheral.connected = false;
+            peripherals.set(peripheral.id, peripheral);
+            let devices = Array.from(peripherals.values());
+            setConnectedDevices(Array.from(devices));
+            setDiscoveredDevices(Array.from(devices));
+            console.log('BLE device disconnected successfully');
+          })
+          .catch(() => {
+            throw Error('failed to disconnect');
+          });
+      }
+    });
+
+  };
+
   const connect = peripheral => {
-    BleManager.createBond(peripheral.id)
+    BleManager.connect(peripheral.id)
       .then(() => {
         peripheral.connected = true;
         peripherals.set(peripheral.id, peripheral);
         let devices = Array.from(peripherals.values());
         setConnectedDevices(Array.from(devices));
         setDiscoveredDevices(Array.from(devices));
-        console.log('BLE device paired successfully');
+        console.log('BLE device connected successfully');
       })
       .catch(() => {
-        throw Error('failed to bond');
+        throw Error('failed to connect');
       });
+    // BleManager.createBond(peripheral.id)
+    //   .then(() => {
+    //     peripheral.connected = true;
+    //     peripherals.set(peripheral.id, peripheral);
+    //     let devices = Array.from(peripherals.values());
+    //     setConnectedDevices(Array.from(devices));
+    //     setDiscoveredDevices(Array.from(devices));
+    //     console.log('BLE device paired successfully');
+    //   })
+    //   .catch(() => {
+    //     throw Error('failed to bond');
+    //   });
   };
 
   const disconnect = peripheral => {
-    BleManager.removeBond(peripheral.id)
+    BleManager.disconnect(peripheral.id)
       .then(() => {
         peripheral.connected = false;
         peripherals.set(peripheral.id, peripheral);
         let devices = Array.from(peripherals.values());
         setConnectedDevices(Array.from(devices));
         setDiscoveredDevices(Array.from(devices));
-        Alert.alert(`Disconnected from ${peripheral.name}`);
+        console.log('BLE device disconnected successfully');
       })
       .catch(() => {
-        throw Error('fail to remove the bond');
+        throw Error('failed to disconnect');
       });
+    // BleManager.removeBond(peripheral.id)
+    //   .then(() => {
+    //     peripheral.connected = false;
+    //     peripherals.set(peripheral.id, peripheral);
+    //     let devices = Array.from(peripherals.values());
+    //     setConnectedDevices(Array.from(devices));
+    //     setDiscoveredDevices(Array.from(devices));
+    //     Alert.alert(`Disconnected from ${peripheral.name}`);
+    //   })
+    //   .catch(() => {
+    //     throw Error('fail to remove the bond');
+    //   });
   };
 
   const isDarkMode = useColorScheme() === 'dark';
